@@ -218,7 +218,7 @@ h3.sec{font:700 18px var(--font-sign);letter-spacing:.02em;margin:18px 0 6px;col
     <header id="topbar">
       <form class="search" id="searchForm" role="search" autocomplete="off">
         <span aria-hidden="true" data-i="search"></span>
-        <input id="q" type="search" placeholder="¿A dónde vas? Ej.: llévame a Walmart" enterkeyhint="go" aria-label="¿A dónde vas?">
+        <input id="q" type="search" placeholder="¿A dónde vas? Walmart, una dirección…" enterkeyhint="go" aria-label="¿A dónde vas? Escribe un negocio, una dirección o una parada">
         <button type="button" class="iconbtn" id="clearBtn" aria-label="Borrar búsqueda" hidden data-i="x"></button>
         <button type="button" class="iconbtn" id="micBtn" aria-label="Decir a dónde vas" hidden data-i="mic"></button>
       </form>
@@ -752,7 +752,8 @@ function runCommand(text) {
   if (r && /^(ruta|route|linea|camion|bus)?\s*\w+$/i.test(norm(raw))) { openView({ type: 'route', r: r.i }); return; }
   const q = parseQuery(raw);
   if (!q) return;
-  if (!S.origin) { S.pending = raw; openView({ type: 'origin', reason: q }, { expand: true }); return; }
+  if (!S.origin) { S.pending = raw; openView({ type: 'origin', reason: stripCommand(raw) || q }, { expand: true }); return; }
+  if (looksLikeAddress(raw)) { geocodeAndGo(stripCommand(raw), false); return; }
   const ref = S.origin;
   const pl = searchPlaces(q, ref);
   let dests = [];
@@ -769,9 +770,89 @@ function runCommand(text) {
     }
     dests = picked.map(x => placeDest(x.p));
   }
-  if (!dests.length) { const st = searchStops(q, ref); dests = st.slice(0, 3).map(x => stopDest(x.s)); }
-  if (!dests.length) { toast(`No encontré «${raw}». Prueba con otro nombre o toca el mapa.`); return; }
+  if (!dests.length) { const st = searchStops(q.replace(/ (y|and|con|e) /, ' & '), ref); dests = st.slice(0, 3).map(x => stopDest(x.s)); }
+  if (!dests.length) { geocodeAndGo(stripCommand(raw), false); return; }
   planAndShow(dests, q);
+}
+
+/* ================= Direcciones (Nominatim de OpenStreetMap) ================= */
+const STREET_WORDS = /\b(st|street|ave|av|avenue|avenida|blvd|boulevard|dr|drive|rd|road|ln|lane|hwy|highway|fwy|freeway|pkwy|parkway|ct|court|pl|place|cir|circle|trl|trail|way|ter|terrace|sq|square|calle|camino|loop|pike|expy|expressway)\b/i;
+function looksLikeAddress(text) {
+  const t = stripCommand(text);
+  return /^\d{1,6}[a-z]?\s+\S+/i.test(t) || /\b76\d{3}\b/.test(t) || (STREET_WORDS.test(t) && /\d/.test(t)) || /,\s*(fort worth|tx|texas)/i.test(t);
+}
+function stripCommand(text) {
+  return String(text || '').trim()
+    .replace(/^((oye|hey|por favor),?\s+)*/i, '')
+    .replace(/^(ll[eé]v[ae](me|nos)|quiero ir|quisiera ir|necesito ir|tengo que ir|c[oó]mo llego|c[oó]mo le hago para llegar|c[oó]mo voy|vamos|ir|take me|go|directions)(\s+(hasta|hacia|para|a la|al|a|to|for))?\s+/i, '')
+    .replace(/^(la direcci[oó]n|direcci[oó]n|the address)\s+/i, '').trim();
+}
+const inArtifact = () => !!window.claude;
+const ADDR_OFFLINE = () => inArtifact()
+  ? 'Esta versión dentro de Claude no puede buscar direcciones. Ábrela en judacorps.github.io/ruta-viva-fw, o mantén presionado el mapa donde quieres ir.'
+  : 'No pude buscar la dirección: revisa tu conexión. También puedes mantener presionado el mapa donde quieres ir.';
+async function nominatim(path, params) {
+  const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 9000);
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/' + path + '?' + new URLSearchParams({ format: 'jsonv2', addressdetails: '1', 'accept-language': 'es', ...params }), { signal: ctrl.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(tm); }
+}
+function addrParts(x) {
+  const a = x.address || {}, road = a.road || a.pedestrian || '';
+  const name = a.house_number && road ? `${a.house_number} ${road}` : (x.name || road || String(x.display_name || '').split(',')[0]);
+  const area = [a.neighbourhood || a.suburb, a.city || a.town || a.village, a.postcode].filter(Boolean).join(', ');
+  return { name, area, exact: !!a.house_number };
+}
+async function geocode(text) {
+  const [s0, w0, n0, e0] = B.bbox;
+  const q = /fort worth|\btx\b|texas|\b76\d{3}\b|,/i.test(text) ? text : text + ', Fort Worth, TX';
+  const js = await nominatim('search', { q, limit: '6', countrycodes: 'us', viewbox: `${w0},${n0},${e0},${s0}`, bounded: '1' });
+  const out = [];
+  for (const x of js) {
+    const lat = +x.lat, lon = +x.lon; if (!inArea(lat, lon)) continue;
+    if (out.some(o => distM(o.lat, o.lon, lat, lon) < 60)) continue;
+    const p = addrParts(x);
+    out.push({ type: 'addr', name: p.name, sub: (p.exact ? 'Dirección' : 'Calle o lugar, sin número exacto') + (p.area ? ' · ' + p.area : ''), lat, lon });
+  }
+  return out.slice(0, 5);
+}
+let geoBusy = false;
+async function geocodeAndGo(text, forOrigin) {
+  if (!text || geoBusy) return;
+  geoBusy = true; toast('Buscando la dirección «' + text + '»…');
+  let res;
+  try { res = await geocode(text); } catch (e) { geoBusy = false; toast(ADDR_OFFLINE()); return; }
+  geoBusy = false;
+  if (!res.length) { toast(`No encontré «${text}» en el área de Trinity Metro. Revisa el número y la calle, o mantén presionado el mapa donde quieres ir.`); return; }
+  if (forOrigin) { const d = res[0]; hideSuggest(); setOrigin({ lat: d.lat, lon: d.lon, label: d.name }); return; }
+  if (!S.origin) { S.pending = text; openView({ type: 'origin', reason: text }, { expand: true }); return; }
+  planAndShow(res, text);
+}
+async function reverseLabel(lat, lon) {
+  try {
+    const x = await nominatim('reverse', { lat: String(lat), lon: String(lon), zoom: '18' });
+    if (x && !x.error) return addrParts(x).name;
+  } catch (e) { /* sin conexión o dentro de Claude */ }
+  const st = nearestStreet(lat, lon);
+  return st ? 'Sobre ' + st : null;
+}
+function nearestStreet(lat, lon) {
+  if (!B) return null;
+  const X = mercX(lon) - B.MX0, Y = mercY(lat) - B.MY0, pad = 6e-6;
+  let best = null, bd = Infinity;
+  for (const r of baseQuery(X - pad, Y - pad, X + pad, Y + pad)) {
+    if (B.cls[r] < 3 || !B.name[r]) continue;
+    const s0 = B.start[r], n = B.cnt[r];
+    for (let k = 0; k < n - 1; k++) {
+      const ax = B.mx[s0 + k], ay = B.my[s0 + k], dx = B.mx[s0 + k + 1] - ax, dy = B.my[s0 + k + 1] - ay, L = dx * dx + dy * dy;
+      const t = L ? Math.max(0, Math.min(1, ((X - ax) * dx + (Y - ay) * dy) / L)) : 0;
+      const d = (X - ax - t * dx) ** 2 + (Y - ay - t * dy) ** 2;
+      if (d < bd) { bd = d; best = B.names[B.name[r] - 1]; }
+    }
+  }
+  return best;
 }
 function planAndShow(dests, label) {
   const c = S.now, day = dayIndex(c.date);
@@ -805,7 +886,10 @@ function initMap() {
   map.on('moveend', () => { refreshStops(); refreshPlaces(); });
   map.on('dragstart', () => { if (S.follow) { S.follow = null; liveRefresh(true); } });
   map.on('click', e => { hideSuggest(); if (S.picking) { setOriginAt(e.latlng); endPick(); } });
-  map.on('contextmenu', e => { setOriginAt(e.latlng); endPick(); });
+  map.on('contextmenu', e => {
+    if (S.picking) { setOriginAt(e.latlng); endPick(); return; }
+    openView({ type: 'point', lat: e.latlng.lat, lon: e.latlng.lng }, { expand: true });
+  });
   zoomClass(); drawOrigin();
 }
 function zoomClass() { $('#map').classList.toggle('z-low', map.getZoom() < 12.5); }
@@ -1013,7 +1097,7 @@ function syncMap(v) {
   const wantRoute = v.type === 'route' ? v.r : -1;
   if (S.selRoute !== wantRoute) { S.selRoute = wantRoute; drawRoutes(); refreshStops(); tick(); }
   if (v.type !== 'itin') clearItin();
-  if (v.type !== 'results' && v.type !== 'place' && v.type !== 'stop') resLayer.clearLayers();
+  if (!['results', 'place', 'stop', 'point'].includes(v.type)) resLayer.clearLayers();
   if (v.type !== 'bus' && S.follow) S.follow = null;
 }
 function render() {
@@ -1163,6 +1247,16 @@ const VIEWS = {
     else { h += '<ul class="list">'; for (const x of ns) h += `<li><button type="button" class="li" data-act="stop" data-s="${x.s}"><span class="grow"><b>${esc(T.stops.n[x.s])}</b><span class="near" style="gap:4px">${T.stopRoutes[x.s].map(r => badge(T.routes[r])).join('')}</span></span><span class="in">${fmtDur(x.sec)} a pie</span></button></li>`; h += '</ul>'; }
     return h;
   },
+  point(v) {
+    let h = header(esc(v.label || 'Punto en el mapa'), v.label === null ? 'Buscando la dirección…' : 'Punto que elegiste en el mapa');
+    if (S.origin) h += `<p class="fine" style="margin:0 0 10px">${fmtMi(distM(S.origin.lat, S.origin.lon, v.lat, v.lon))} en línea recta desde ${esc(S.origin.label)}</p>`;
+    h += `<div class="row"><button type="button" class="btn" data-act="gopoint">${ICON.flag} Llévame aquí</button><button type="button" class="btn ghost" data-act="frompoint">Salir desde aquí</button></div>`;
+    const ns = nearbyStops(v.lat, v.lon, 700).slice(0, 3);
+    h += '<h3 class="sec">Paradas más cercanas</h3>';
+    if (!ns.length) h += '<p class="fine">No hay paradas a menos de 10 minutos caminando.</p>';
+    else { h += '<ul class="list">'; for (const x of ns) h += `<li><button type="button" class="li" data-act="stop" data-s="${x.s}"><span class="grow"><b>${esc(T.stops.n[x.s])}</b><span class="near" style="gap:4px">${T.stopRoutes[x.s].map(r => badge(T.routes[r])).join('')}</span></span><span class="in">${fmtDur(x.sec)} a pie</span></button></li>`; h += '</ul>'; }
+    return h;
+  },
   routes() {
     let h = header('Rutas y horarios', 'Toca una ruta para ver sus paradas y autobuses');
     const groups = [['Tren', r => r.type !== 3], ['Autobuses de Trinity Metro', r => r.type === 3 && r.a === 0], ['Grapevine Visitors Shuttle', r => r.type === 3 && r.a !== 0]];
@@ -1200,8 +1294,8 @@ const VIEWS = {
   origin(v) {
     let h = header('¿Desde dónde sales?', v.reason ? `Para llevarte a «${esc(v.reason)}» necesito saber dónde estás.` : '');
     h += `<div class="row" style="margin-bottom:10px"><button type="button" class="btn" data-act="gps">${ICON.gps} Usar mi ubicación</button><button type="button" class="btn ghost" data-act="pickmap">Tocar el mapa</button></div>`;
-    h += `<label class="field">O busca una parada o negocio<input id="oq" type="search" placeholder="Ej.: Hemphill & Berry, La Gran Plaza" autocomplete="off"></label><div id="osug"></div>`;
-    h += '<p class="fine">También puedes dejar presionado un punto del mapa para marcarlo como salida.</p>';
+    h += `<label class="field">O escribe una dirección, parada o negocio<input id="oq" type="search" placeholder="Ej.: 1600 Hemphill St, La Gran Plaza" autocomplete="off" enterkeyhint="search"></label><div id="osug"></div>`;
+    h += '<p class="fine">También puedes mantener presionado un punto del mapa y tocar «Salir desde aquí».</p>';
     return h;
   },
   time() {
@@ -1222,7 +1316,8 @@ const VIEWS = {
       <p>Mapa del transporte público de Fort Worth con los autobuses y el TEXRail moviéndose según su horario, más los negocios que hay cerca de cada parada.</p>
       <h3 class="sec">De dónde salen los datos</h3>
       <ul class="list"><li class="li"><span class="grow"><b>Rutas, paradas y horarios</b><small>Trinity Metro, formato GTFS · versión ${esc(f.feed_version || '')} · vigente del ${feedRange()}</small></span></li>
-      <li class="li"><span class="grow"><b>Calles, ríos, parques y negocios</b><small>© OpenStreetMap y sus colaboradores (licencia ODbL)</small></span></li></ul>
+      <li class="li"><span class="grow"><b>Calles, ríos, parques y negocios</b><small>© OpenStreetMap y sus colaboradores (licencia ODbL)</small></span></li>
+      <li class="li"><span class="grow"><b>Búsqueda de direcciones</b><small>Nominatim de OpenStreetMap. Solo se envía la dirección que escribes, cuando la buscas.</small></span></li></ul>
       <h3 class="sec">Ten en cuenta</h3>
       <p class="fine">Esta app no es de Trinity Metro. Trinity Metro no publica la ubicación GPS de sus autobuses, así que cada autobús se dibuja donde debería ir según el horario. Si va retrasado, la app no lo sabe. Para avisos del servicio consulta <a class="ext" href="https://ridetrinitymetro.org" target="_blank" rel="noopener">ridetrinitymetro.org</a>.</p>
       <p class="fine">Los tiempos a pie se calculan en línea recta con un margen para las calles. Revisa el camino antes de salir, sobre todo de noche.</p>`;
@@ -1285,6 +1380,14 @@ const ENTER = {
     map.setView([p.lat, p.lon], Math.max(map.getZoom(), 16));
   },
   bus(v) { const m = buses.get(v.key); if (m) map.panTo(m.getLatLng()); },
+  point(v) {
+    resLayer.clearLayers();
+    L.marker([v.lat, v.lon], { pane: 'pins', icon: pinIcon('', colors().accent), keyboard: false, title: 'Punto elegido' }).addTo(resLayer);
+    if (v.label === undefined) {
+      v.label = null;
+      reverseLabel(v.lat, v.lon).then(lbl => { v.label = lbl || 'Punto en el mapa'; if (topView() === v) render(); });
+    }
+  },
 };
 function openItin(v, i, j) {
   const it = v.items[i], jj = j || it.best;
@@ -1305,7 +1408,10 @@ function hideSuggest() { $('#suggest').hidden = true; }
 function suggestHtml(q, forOrigin) {
   const ref = refPoint(), qq = parseQuery(q), out = [];
   if (!qq) return '';
-  if (!forOrigin) out.push(`<button type="button" class="sg" data-act="cmd" data-q="${esc(q)}"><span class="go">${ICON.flag}</span><span class="grow"><b>Llévame a «${esc(qq)}»</b><small>${S.origin ? 'Desde ' + esc(S.origin.label) : 'Te pregunto desde dónde sales'}</small></span></button>`);
+  const addr = stripCommand(q), isAddr = looksLikeAddress(q);
+  if (!forOrigin) out.push(`<button type="button" class="sg" data-act="cmd" data-q="${esc(q)}"><span class="go">${ICON.flag}</span><span class="grow"><b>Llévame a «${esc(isAddr ? addr : qq)}»</b><small>${S.origin ? 'Desde ' + esc(S.origin.label) : 'Te pregunto desde dónde sales'}</small></span></button>`);
+  if (forOrigin && addr.length >= 4) out.push(`<button type="button" class="sg" data-act="addrfrom" data-q="${esc(addr)}"><span class="go">${ICON.pin}</span><span class="grow"><b>Salir desde la dirección «${esc(addr)}»</b><small>Búscala en el mapa de Fort Worth</small></span></button>`);
+  else if (!isAddr && addr.length >= 6 && /\d/.test(addr)) out.push(`<button type="button" class="sg" data-act="addr" data-q="${esc(addr)}"><span class="go">${ICON.pin}</span><span class="grow"><b>Buscar la dirección «${esc(addr)}»</b><small>Calle y número en Fort Worth</small></span></button>`);
   const r = matchRoute(q);
   if (r && !forOrigin) out.push(`<button type="button" class="sg" data-act="route" data-r="${r.i}">${badge(r)}<span class="grow"><b>${esc(r.l)}</b><small>Ver ruta y autobuses</small></span></button>`);
   for (const { p, d } of searchPlaces(qq, ref).slice(0, 6)) out.push(`<button type="button" class="sg" data-act="${forOrigin ? 'fromplace' : 'place'}" data-p="${p.i}"><span class="cdot" style="--k:${CAT_COLOR[p.cat]}"></span><span class="grow"><b>${esc(p.name)}</b><small>${esc(P.cats[p.cat])}${p.addr ? ' · ' + esc(p.addr) : ''}</small></span><span class="in">${fmtMi(d)}</span></button>`);
@@ -1341,6 +1447,14 @@ function act(el) {
     }
     case 'fromplace': { const p = P.list[+d.p]; hideSuggest(); setOrigin({ lat: p.lat, lon: p.lon, label: p.name }); break; }
     case 'fromstop': { const s = +d.s; hideSuggest(); setOrigin({ lat: T.stops.lat[s], lon: T.stops.lon[s], label: T.stops.n[s] }); break; }
+    case 'addr': hideSuggest(); geocodeAndGo(d.q, false); break;
+    case 'addrfrom': geocodeAndGo(d.q, true); break;
+    case 'gopoint': {
+      const v = topView(), dest = { type: 'addr', name: v.label || 'Punto en el mapa', sub: 'Punto que elegiste en el mapa', lat: v.lat, lon: v.lon };
+      if (!S.origin) { toast('Primero dime desde dónde sales.'); openView({ type: 'origin' }, { expand: true }); break; }
+      planAndShow([dest], dest.name); break;
+    }
+    case 'frompoint': { const v = topView(); setOrigin({ lat: v.lat, lon: v.lon, label: v.label || 'Punto en el mapa' }); break; }
     case 'res': openItin(topView(), +d.i); break;
     case 'alt': { const v = topView(); const j = v.later[+d.i]; openView({ type: 'itin', item: v.item, j, later: [], date: v.date }, { replace: true }); break; }
     case 'opt': { const v = topView(); const j = v.item.opts[+d.i]; openView({ type: 'itin', item: v.item, j, later: j.walkOnly ? [] : laterJourneys(S.origin, v.item.dest, dayIndex(v.date), j, 3), date: v.date }, { replace: true }); break; }
@@ -1375,6 +1489,14 @@ function initUI() {
   $('#clearBtn').addEventListener('click', () => { q.value = ''; $('#clearBtn').hidden = true; hideSuggest(); q.focus(); });
   $('#body').addEventListener('input', e => {
     if (e.target.id === 'oq') { const v = e.target.value; $('#osug').innerHTML = v.trim().length >= 2 ? suggestHtml(v, true) : ''; }
+  });
+  $('#body').addEventListener('keydown', e => {
+    if (e.target.id !== 'oq' || e.key !== 'Enter') return;
+    e.preventDefault();
+    const v = e.target.value.trim(); if (!v) return;
+    if (looksLikeAddress(v)) { geocodeAndGo(stripCommand(v), true); return; }
+    const first = $('#osug [data-act="fromplace"], #osug [data-act="fromstop"]');
+    if (first) act(first); else geocodeAndGo(stripCommand(v), true);
   });
   $('#originChip').addEventListener('click', () => openView({ type: 'origin' }, { expand: true }));
   $('#clockChip').addEventListener('click', () => openView({ type: 'time' }, { expand: true }));
