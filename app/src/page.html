@@ -188,6 +188,29 @@ h3.sec{font:700 18px var(--font-sign);letter-spacing:.02em;margin:18px 0 6px;col
 .field{display:flex;flex-direction:column;gap:4px;margin:8px 0;font-size:13.5px;color:var(--muted)}
 .field input{font:inherit;font-size:16px;color:var(--fg);background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
 .ext{color:var(--accent);font-weight:700}
+.link.inline{padding:0;font-size:inherit}
+.countdown{display:flex;flex-direction:column;gap:6px;margin:0 0 14px}
+.countdown .led{font-size:24px}
+.cd-sub{margin:0;color:var(--muted);font-size:13.5px}
+.go-now,.go-later{margin:0;border-radius:10px;padding:9px 12px;font-weight:700;font-size:14px}
+.go-later{background:var(--accent-soft);color:var(--fg)}
+.go-now{background:var(--led);color:#1b1300}
+.chip.trip{background:var(--led-bg);color:var(--led);border-color:transparent;font:700 15px var(--font-sign);letter-spacing:.04em;text-transform:uppercase;padding-left:5px}
+.chip.trip .badge{height:24px;min-width:30px;font-size:14px}
+.nx{align-items:center;gap:6px;margin-top:6px}
+.nx span:not(.badge){background:transparent;border:0;padding:0;color:var(--fg);font-size:13px;font-weight:700;margin-right:6px}
+.near .badge{background:var(--c);color:var(--t);border:0;padding:0 6px;height:22px;min-width:28px;font-size:14px;border-radius:5px}
+/* banderitas de "súbete / bájate aquí" */
+.sf{position:absolute;left:0;top:0}
+.sf i{position:absolute;left:-9px;top:-9px;width:18px;height:18px;border-radius:50%;background:var(--surface);border:5px solid var(--c);box-shadow:0 1px 4px rgba(0,0,0,.45)}
+.sf-chip{position:absolute;left:0;bottom:14px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;background:var(--c);color:var(--t);border-radius:10px;padding:5px 10px 6px;box-shadow:0 3px 10px rgba(0,0,0,.35);white-space:nowrap;line-height:1.2;cursor:pointer}
+.sf-chip::after{content:"";position:absolute;left:50%;bottom:-6px;margin-left:-6px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:6px solid var(--c)}
+.sf-chip b{font:700 15px var(--font-sign);letter-spacing:.04em;text-transform:uppercase}
+.sf-chip span{font-size:12px;max-width:190px;overflow:hidden;text-overflow:ellipsis}
+.sf.off .sf-chip{bottom:auto;top:14px}
+.sf.off .sf-chip::after{bottom:auto;top:-6px;border-top:0;border-bottom:6px solid var(--c)}
+.leaflet-tooltip.stoplbl{background:var(--surface);color:var(--fg);border:1px solid var(--line);box-shadow:none;padding:1px 6px;font:700 11.5px var(--font-body)}
+.leaflet-tooltip.stoplbl::before{display:none}
 
 /* ---- marcadores del mapa ---- */
 .bus-icon{transition:transform 1s linear}
@@ -225,6 +248,7 @@ h3.sec{font:700 18px var(--font-sign);letter-spacing:.02em;margin:18px 0 6px;col
       <div id="suggest" role="listbox" aria-label="Sugerencias" hidden></div>
       <div id="chips">
         <button type="button" class="chip" id="originChip"><span class="ic" data-i="pin"></span><span id="originLabel">¿Desde dónde sales?</span></button>
+        <button type="button" class="chip trip" id="tripChip" hidden aria-label="Ver mi viaje"></button>
         <button type="button" class="chip" id="clockChip"><span class="live-dot" id="liveDot"></span><span id="clockLabel">--:--</span></button>
       </div>
     </header>
@@ -923,14 +947,31 @@ function refreshStops() {
   if (!map) return;
   const z = map.getZoom(); let set = null;
   if (S.selRoute >= 0) { if (z < 12) return; set = new Set(); for (const pi of T.routePats[S.selRoute]) for (const s of T.pats[pi].s) set.add(s); }
-  else if (z < 15) return;
+  else if (z < 14) return;
   const C = colors(), b = map.getBounds().pad(0.15), ring = S.selRoute >= 0 ? T.routes[S.selRoute].color : C.fg;
+  const r = z >= 16 ? 6.5 : z >= 15 ? 5 : 3.8, label = z >= 17;
   for (let s = 0; s < T.n; s++) {
     if (set && !set.has(s)) continue;
     const ll = [T.stops.lat[s], T.stops.lon[s]]; if (!b.contains(ll)) continue;
-    L.circleMarker(ll, { renderer: stopRenderer, radius: z >= 16 ? 6 : 4.5, color: ring, weight: 2.5, fillColor: C.surface, fillOpacity: 1, bubblingMouseEvents: false })
-      .on('click', () => openView({ type: 'stop', s }, { expand: true })).addTo(stopLayer);
+    const m = L.circleMarker(ll, { renderer: stopRenderer, radius: r, color: ring, weight: z >= 15 ? 2.5 : 2, fillColor: C.surface, fillOpacity: 1, bubblingMouseEvents: false });
+    m.bindTooltip(esc(T.stops.n[s]), label ? { permanent: true, direction: 'right', offset: [9, 0], className: 'stoplbl' } : { direction: 'top', offset: [0, -6] });
+    m.on('click', () => openView({ type: 'stop', s }, { expand: true })).addTo(stopLayer);
   }
+}
+// Lado de la calle donde se espera el autobús, según la descripción de la parada.
+const SIDE = { Northbound: 'norte', Southbound: 'sur', Eastbound: 'este', Westbound: 'oeste' };
+const SPOT = { 'Near Side': 'antes del cruce', 'Far Side': 'después del cruce', 'Mid Block': 'a media cuadra' };
+function stopSide(s) {
+  const d = T.stops.d[s] || '';
+  if (/request/i.test(d)) return 'Parada a pedido: haz la señal al chofer';
+  const [dir, spot] = d.split(' - ');
+  return SIDE[dir] ? `Sentido ${SIDE[dir]}${SPOT[spot] ? ', ' + SPOT[spot] : ''}` : '';
+}
+function stopWhere(s) { const side = stopSide(s); return `Parada ${esc(T.stops.c[s])}${side ? ' · ' + esc(side) : ''}`; }
+function stopFlag(s, kind, R, time) {
+  const html = `<div class="sf ${kind}" style="--c:${R.color};--t:${R.text}"><div class="sf-chip"><b>${kind === 'on' ? 'Súbete aquí' : 'Bájate aquí'} · ${fmtTime(time)}</b><span>${esc(T.stops.n[s])}</span></div><i></i></div>`;
+  return L.marker([T.stops.lat[s], T.stops.lon[s]], { pane: 'pins', keyboard: false, zIndexOffset: kind === 'on' ? 500 : 400, icon: L.divIcon({ className: '', iconSize: null, html }) })
+    .on('click', () => openView({ type: 'stop', s }, { expand: true }));
 }
 function refreshPlaces() {
   placeLayer.clearLayers();
@@ -979,6 +1020,7 @@ function tick() {
   }
   for (const [k, m] of buses) if (!seen.has(k)) { m.remove(); buses.delete(k); }
   S.activeCount = count; S.activeByRoute = byRoute;
+  updateTripChip();
   if (S.follow) { const m = buses.get(S.follow); if (m) map.panTo(m.getLatLng(), { animate: true, duration: 0.9, noMoveStart: true }); }
   liveRefresh();
 }
@@ -1011,7 +1053,8 @@ function drawItin(j, dest) {
       const Pt = T.pats[l.tr.p], R = T.routes[Pt.r], seg = sliceShape(T.shapes[Pt.sh], Pt.sd[l.bI], Pt.sd[l.aI]);
       L.polyline(seg, { renderer: itinRenderer, color: C.mRouteCasing, weight: 11, opacity: 0.95, interactive: false }).addTo(itinLayer);
       L.polyline(seg, { renderer: itinRenderer, color: R.color, weight: 7, opacity: 1, interactive: false }).addTo(itinLayer);
-      for (const s of [l.fromS, l.toS]) L.circleMarker([T.stops.lat[s], T.stops.lon[s]], { renderer: itinRenderer, radius: 7, color: R.color, weight: 3.5, fillColor: C.surface, fillOpacity: 1, interactive: false }).addTo(itinLayer);
+      stopFlag(l.fromS, 'on', R, l.dep).addTo(itinLayer);
+      stopFlag(l.toS, 'off', R, l.arr).addTo(itinLayer);
       seg.forEach(x => pts.push(x)); keys.add(l.tr.key); prev = [T.stops.lat[l.toS], T.stops.lon[l.toS]];
     }
   }
@@ -1097,7 +1140,7 @@ function syncMap(v) {
   const wantRoute = v.type === 'route' ? v.r : -1;
   if (S.selRoute !== wantRoute) { S.selRoute = wantRoute; drawRoutes(); refreshStops(); tick(); }
   if (v.type !== 'itin') clearItin();
-  if (!['results', 'place', 'stop', 'point'].includes(v.type)) resLayer.clearLayers();
+  if (!['results', 'place', 'stop', 'point', 'nearstops'].includes(v.type)) resLayer.clearLayers();
   if (v.type !== 'bus' && S.follow) S.follow = null;
 }
 function render() {
@@ -1116,7 +1159,8 @@ const LIVE = {
   home: () => ({ count: countText() }),
   bus: v => ({ stops: busStopsHtml(v) }),
   stop: v => ({ deps: depsHtml(v) }),
-  itin: v => { const o = {}; v.j.legs.forEach((l, i) => { if (l.type === 'bus') o['leg' + i] = esc(liveText(l)); }); return o; },
+  itin: v => { const o = { cd: v.j.walkOnly ? '' : countdownHtml(v.j) }; v.j.legs.forEach((l, i) => { if (l.type === 'bus') o['leg' + i] = esc(liveText(l)); }); return o; },
+  nearstops: v => { const o = {}; (v.list || []).forEach((x, i) => { o['ns' + i] = nextAtStopText(x.s); }); return o; },
   routes: () => { const o = {}; T.routes.forEach(r => { o['r' + r.i] = routeCountText(r.i); }); return o; },
 };
 function liveRefresh(force) {
@@ -1169,6 +1213,7 @@ const VIEWS = {
         : `<div class="card origin-card need"><div><b>Primero, ¿dónde estás?</b><small>Con eso te digo qué autobús tomar y te muestro lo que tienes cerca.</small></div><div class="row"><button type="button" class="btn" data-act="gps">${ICON.gps} Usar mi ubicación</button><button type="button" class="btn ghost" data-act="pickmap">Tocar el mapa</button></div></div>`}
       ${out ? `<p class="card warn">Esta fecha está fuera de los horarios publicados (${feedRange()}).</p>` : ''}
       <div class="menu">
+        <button type="button" class="mitem" data-act="nearstops">${ICON.pin}<span><b>Paradas cerca de ti</b><small>Dónde tomar el autobús y cuánto falta</small></span></button>
         <button type="button" class="mitem" data-act="nearby">${ICON.store}<span><b>Negocios cerca</b><small>Lo que hay junto a las paradas</small></span></button>
         <button type="button" class="mitem" data-act="routes">${ICON.bus}<span><b>Rutas y horarios</b><small>${T.routes.length} rutas, con sus paradas</small></span></button>
         <button type="button" class="mitem" data-act="time">${ICON.clock}<span><b>Hora del mapa</b><small>${S.offset ? 'Viendo otra hora' : 'En vivo'}</small></span></button>
@@ -1193,7 +1238,9 @@ const VIEWS = {
   itin(v) {
     const j = v.j, d = v.item.dest;
     let h = header(esc(d.name), esc(d.sub || ''));
-    h += `<div class="sum"><div class="times"><b>${fmtTime(j.dep)}</b><span>→</span><b>${fmtTime(j.arr)}</b></div><div class="meta">${fmtDur(j.arr - j.dep)} · ${j.buses ? (j.buses === 1 ? '1 autobús' : j.buses + ' autobuses') : 'a pie'} · ${fmtDur(j.walkSec)} caminando</div></div><ol class="legs">`;
+    h += `<div class="sum"><div class="times"><b>${fmtTime(j.dep)}</b><span>→</span><b>${fmtTime(j.arr)}</b></div><div class="meta">${fmtDur(j.arr - j.dep)} · ${j.buses ? (j.buses === 1 ? '1 autobús' : j.buses + ' autobuses') : 'a pie'} · ${fmtDur(j.walkSec)} caminando</div></div>`;
+    if (!j.walkOnly) h += `<div class="countdown" data-live="cd">${countdownHtml(j)}</div>`;
+    h += '<ol class="legs">';
     j.legs.forEach((l, i) => { h += legHtml(l, d, i); });
     h += '</ol>';
     if (v.later && v.later.length) {
@@ -1224,7 +1271,8 @@ const VIEWS = {
   },
   stop(v) {
     const s = v.s;
-    let h = header(esc(T.stops.n[s]), `Parada ${esc(T.stops.c[s])}${T.stops.d[s] ? ' · ' + esc(T.stops.d[s]) : ''}`);
+    let h = header(esc(T.stops.n[s]), stopWhere(s));
+    if (S.origin) { const dm = distM(S.origin.lat, S.origin.lon, T.stops.lat[s], T.stops.lon[s]); h += `<p class="fine" style="margin:0 0 10px">${dm < 3000 ? `A unos ${fmtDur(walkSec(dm))} caminando de ${esc(S.origin.label)}` : `${fmtMi(dm)} en línea recta de ${esc(S.origin.label)}`}</p>`; }
     h += `<div class="quick">${T.stopRoutes[s].map(r => `<button type="button" class="qchip" style="padding:4px 6px" data-act="route" data-r="${r}" aria-label="Ruta ${esc(T.routes[r].label)}">${badge(T.routes[r])}</button>`).join('')}</div>`;
     h += `<div class="row" style="margin-bottom:6px"><button type="button" class="btn" data-act="gostop" data-s="${s}">${ICON.flag} Llévame aquí</button><button type="button" class="btn ghost" data-act="fromstop" data-s="${s}">Salir desde aquí</button></div>`;
     h += `<h3 class="sec">Próximas salidas</h3><div data-live="deps">${depsHtml(v)}</div>`;
@@ -1246,6 +1294,17 @@ const VIEWS = {
     if (!ns.length) h += '<p class="fine">No hay paradas a menos de 10 minutos caminando.</p>';
     else { h += '<ul class="list">'; for (const x of ns) h += `<li><button type="button" class="li" data-act="stop" data-s="${x.s}"><span class="grow"><b>${esc(T.stops.n[x.s])}</b><span class="near" style="gap:4px">${T.stopRoutes[x.s].map(r => badge(T.routes[r])).join('')}</span></span><span class="in">${fmtDur(x.sec)} a pie</span></button></li>`; h += '</ul>'; }
     return h;
+  },
+  nearstops(v) {
+    const ref = refPoint();
+    v.list = nearbyStops(ref.lat, ref.lon, 900).slice(0, 10);
+    let h = header('Paradas cerca de ti', S.origin ? 'Desde ' + esc(S.origin.label) : 'Alrededor del centro del mapa. Marca tu salida para verlas desde donde estás.');
+    if (!v.list.length) return h + '<p class="fine">No hay paradas a menos de 15 minutos caminando.</p>';
+    h += '<ul class="list">';
+    v.list.forEach((x, i) => {
+      h += `<li><button type="button" class="li" data-act="stop" data-s="${x.s}"><span class="num">${i + 1}</span><span class="grow"><b>${esc(T.stops.n[x.s])}</b><small>${stopWhere(x.s)}</small><span class="near nx" data-live="ns${i}">${nextAtStopText(x.s)}</span></span><span class="in">${fmtDur(x.sec)} a pie</span></button></li>`;
+    });
+    return h + '</ul><p class="fine">Debajo de cada parada ves cuánto falta para los próximos autobuses, según el horario.</p>';
   },
   point(v) {
     let h = header(esc(v.label || 'Punto en el mapa'), v.label === null ? 'Buscando la dirección…' : 'Punto que elegiste en el mapa');
@@ -1342,10 +1401,58 @@ function legHtml(l, dest, idx) {
     <div class="led">${badge(R)}<span>${esc(Pt.h || R.l)}</span></div>
     ${l.wait > 90 ? `<p class="muted">Esperas unos ${fmtDur(l.wait)}</p>` : ''}
     <p><b>Súbete en ${esc(T.stops.n[l.fromS])}</b> · <span class="tm">${fmtTime(l.dep)}</span></p>
+    <p class="muted">${stopWhere(l.fromS)} · <button type="button" class="link inline" data-act="zoomstop" data-s="${l.fromS}">Ver la parada</button></p>
     <p class="live" data-live="leg${idx}">${esc(liveText(l))}</p>
     <p class="muted">${n} ${n === 1 ? 'parada' : 'paradas'} · ${fmtDur(l.arr - l.dep)}</p>
     <p><b>Bájate en ${esc(T.stops.n[l.toS])}</b> · <span class="tm">${fmtTime(l.arr)}</span></p>
+    <p class="muted">Parada ${esc(T.stops.c[l.toS])} · <button type="button" class="link inline" data-act="zoomstop" data-s="${l.toS}">Ver la parada</button></p>
     <button type="button" class="link" data-act="follow" data-k="${esc(l.tr.key)}">Ver mi autobús en el mapa</button></div></li>`;
+}
+/* ---- Cuenta regresiva de tu autobús ---- */
+function fmtLeft(sec) { const m = Math.round(sec / 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; }
+function tripTimes(j) {
+  const l = j.legs.find(x => x.type === 'bus'); if (!l) return null;
+  const walk = j.legs[0].type === 'walk' && j.legs[0].fromS < 0 ? j.legs[0].sec : 0;
+  const atStop = depAt(l.tr, l.bI);
+  return { l, atStop, walk, leave: atStop - walk };
+}
+function countdownHtml(j) {
+  const tt = tripTimes(j); if (!tt) return '';
+  const t = S.now.secs, R = routeOf(tt.l.tr), left = tt.atStop - t, stop = T.stops.n[tt.l.fromS];
+  let big, sub = `en ${esc(stop)} · ${fmtTime(tt.atStop)} según horario`, go = '';
+  if (left < -90) { big = 'Tu autobús ya pasó'; sub = 'Toca otra salida en «Más tarde».'; }
+  else if (left < 60) big = 'Tu autobús está llegando';
+  else big = 'Llega en ' + fmtLeft(left);
+  if (left >= 60 && tt.walk) {
+    const lv = tt.leave - t;
+    go = lv <= 0 ? `<p class="go-now">Sal ya: necesitas ${fmtDur(tt.walk)} para llegar a la parada.</p>`
+      : `<p class="go-later">Sal en ${fmtLeft(lv)} (a las ${fmtTime(tt.leave)}) y camina ${fmtDur(tt.walk)} a la parada.</p>`;
+  }
+  return `<div class="led big">${badge(R)}<span>${big}</span></div><p class="cd-sub">${sub}</p>${go}`;
+}
+// Aviso fijo arriba mientras tienes un viaje abierto, aunque mires otra parte del mapa.
+function updateTripChip() {
+  const chip = $('#tripChip'), tr = S.trip; if (!chip) return;
+  if (!tr) { chip.hidden = true; return; }
+  const tt = tripTimes(tr.j), t = S.now.secs;
+  if (!tt || S.now.date !== tr.date || tt.atStop - t < -120) { S.trip = null; chip.hidden = true; return; }
+  const left = tt.atStop - t, R = routeOf(tt.l.tr);
+  chip.hidden = false;
+  chip.innerHTML = `${badge(R)}<span>${left < 60 ? 'Llegando a tu parada' : 'Llega en ' + fmtLeft(left)}</span>`;
+  const alerts = [[tt.leave - t, 'leave', 'Es hora de salir hacia la parada ' + T.stops.n[tt.l.fromS] + '.'], [left - 300, '5', 'Tu autobús llega en 5 minutos.'], [left - 60, '1', 'Tu autobús llega en 1 minuto. ¡Prepárate!']];
+  for (const [d, k, msg] of alerts) {
+    if (d <= 0 && d > -45 && !tr.done.has(k)) { tr.done.add(k); toast(msg); try { navigator.vibrate && navigator.vibrate([180, 90, 180]); } catch (e) { /* sin vibración */ } }
+  }
+}
+function nextAtStopText(s) {
+  const t = S.now.secs, deps = [];
+  for (const [pi, i] of T.stopPats[s]) {
+    if (i === T.pats[pi].s.length - 1) continue;
+    for (const tr of S.day.byPat[pi]) { const d = depAt(tr, i); if (d >= t - 30 && d <= t + 3600) { deps.push({ tr, d }); break; } }
+  }
+  deps.sort((a, b) => a.d - b.d);
+  if (!deps.length) return 'Sin salidas en la próxima hora';
+  return deps.slice(0, 3).map(({ tr, d }) => `${badge(routeOf(tr))} <span>${d - t < 60 ? 'llegando' : fmtLeft(d - t)}</span>`).join(' ');
 }
 function liveText(l) {
   const tr = l.tr, t = S.now.secs;
@@ -1368,12 +1475,32 @@ const ENTER = {
     });
     fitTo(pts, 15);
   },
-  itin(v) { drawItin(v.j, v.item.dest); },
+  itin(v) {
+    drawItin(v.j, v.item.dest);
+    if (!v.j.walkOnly && (!S.trip || S.trip.j !== v.j)) { S.trip = { j: v.j, date: v.date, view: v, done: new Set() }; updateTripChip(); }
+  },
+  nearstops(v) {
+    resLayer.clearLayers();
+    const pts = [], o = S.origin; if (o) pts.push([o.lat, o.lon]);
+    (v.list || []).forEach((x, i) => {
+      const ll = [T.stops.lat[x.s], T.stops.lon[x.s]]; pts.push(ll);
+      L.marker(ll, { pane: 'pins', icon: pinIcon(String(i + 1), colors().fg), keyboard: false, title: T.stops.n[x.s] }).on('click', () => openView({ type: 'stop', s: x.s }, { expand: true })).addTo(resLayer);
+    });
+    fitTo(pts, 17);
+  },
   route(v) {
     const ll = []; for (const pi of T.routePats[v.r]) { const sh = T.shapes[T.pats[pi].sh]; for (let i = 0; i < sh.lat.length; i += 4) ll.push([sh.lat[i], sh.lon[i]]); }
     fitTo(ll, 15);
   },
-  stop(v) { resLayer.clearLayers(); const ll = [T.stops.lat[v.s], T.stops.lon[v.s]]; if (map.getZoom() < 15) map.setView(ll, 16); else map.panTo(ll); },
+  stop(v) {
+    resLayer.clearLayers();
+    const ll = [T.stops.lat[v.s], T.stops.lon[v.s]], C = colors(), o = S.origin;
+    L.marker(ll, { pane: 'pins', keyboard: false, icon: L.divIcon({ className: '', iconSize: null, html: `<div class="sf on" style="--c:${C.fg};--t:${C.surface}"><div class="sf-chip"><b>Parada ${esc(T.stops.c[v.s])}</b><span>${esc(T.stops.n[v.s])}</span></div><i></i></div>` }) }).addTo(resLayer);
+    if (o && distM(o.lat, o.lon, ll[0], ll[1]) < 2500) {
+      L.polyline([[o.lat, o.lon], ll], { renderer: itinRenderer, color: C.fg, weight: 4, opacity: 0.7, dashArray: '2 9', lineCap: 'round', interactive: false }).addTo(resLayer);
+      fitTo([[o.lat, o.lon], ll], 17);
+    } else map.setView(ll, Math.max(map.getZoom(), 16));
+  },
   place(v) {
     resLayer.clearLayers(); const p = P.list[v.i];
     L.marker([p.lat, p.lon], { pane: 'pins', icon: pinIcon('', CAT_COLOR[p.cat]), keyboard: false, title: p.name }).addTo(resLayer);
@@ -1428,6 +1555,8 @@ function act(el) {
     case 'origin': openView({ type: 'origin' }, { expand: true }); break;
     case 'routes': openView({ type: 'routes' }, { expand: true }); break;
     case 'nearby': openView({ type: 'nearby' }, { expand: true }); break;
+    case 'nearstops': openView({ type: 'nearstops' }, { expand: true }); break;
+    case 'zoomstop': { const s = +d.s; map.setView([T.stops.lat[s], T.stops.lon[s]], 17); if (window.innerWidth < 900) setSheet(0); break; }
     case 'time': openView({ type: 'time' }, { expand: true }); break;
     case 'route': hideSuggest(); openView({ type: 'route', r: +d.r }, { expand: true }); break;
     case 'dir': topView().dir = +d.d; render(); break;
@@ -1500,6 +1629,7 @@ function initUI() {
   });
   $('#originChip').addEventListener('click', () => openView({ type: 'origin' }, { expand: true }));
   $('#clockChip').addEventListener('click', () => openView({ type: 'time' }, { expand: true }));
+  $('#tripChip').addEventListener('click', () => { if (!S.trip) return; if (topView() !== S.trip.view) openView(S.trip.view, { expand: true }); else setSheet(true); });
   $('#locBtn').addEventListener('click', () => { if (S.origin && S.origin.gps) map.setView([S.origin.lat, S.origin.lon], 15); else useGPS(); });
   $('#placesBtn').addEventListener('click', e => {
     S.showPlaces = !S.showPlaces; e.currentTarget.setAttribute('aria-pressed', S.showPlaces); refreshPlaces();
