@@ -1,0 +1,9 @@
+# generados para Claude / pruebas locales
+app/index.html
+app/dev.html
+# descargas crudas
+gtfs/
+gtfs.zip
+osm_raw/
+__pycache__/
+.claude/
